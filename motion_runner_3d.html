@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Motion Runner 3D</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#07111f;color:#fff;font-family:system-ui,Arial,sans-serif;touch-action:none}
+#game{position:fixed;inset:0}canvas{display:block}
+#hud{position:fixed;inset:0;pointer-events:none}
+.pill{background:#07111fbb;border:1px solid #7adfff66;border-radius:14px;padding:9px 12px;backdrop-filter:blur(8px);font-weight:700;text-shadow:0 1px 4px #000}
+#score{position:absolute;left:12px;top:12px;font-size:14px;line-height:1.5}
+#status{position:absolute;right:12px;top:12px;max-width:48%;font-size:12px;text-align:center}
+#help{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);width:calc(100% - 24px);max-width:540px;text-align:center;font-size:12px;line-height:1.5}
+#overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(#06101dcc,#06101df0);z-index:5}
+.panel{width:min(460px,100%);padding:22px;border-radius:22px;background:#0d2035f2;border:1px solid #72dfff66;box-shadow:0 15px 60px #0009;text-align:center}
+h1{font-size:26px;margin:0 0 8px}p{color:#d5e7f5;line-height:1.5;font-size:14px}
+button{border:0;border-radius:14px;padding:13px 18px;background:#3bd4ff;color:#04111b;font-size:16px;font-weight:800;margin:5px}
+button.secondary{background:#233c55;color:#fff}
+#cam{position:fixed;right:10px;bottom:82px;width:110px;height:145px;object-fit:cover;transform:scaleX(-1);border-radius:12px;border:1px solid #7adfff77;opacity:.72;display:none;z-index:3;background:#111}
+#camlabel{position:fixed;right:10px;bottom:62px;font-size:10px;color:#d5e7f5;display:none;z-index:3}
+#fallback{position:fixed;left:12px;bottom:78px;display:flex;gap:8px;pointer-events:auto;z-index:4}
+#fallback button{font-size:12px;padding:10px 12px;margin:0;background:#102c45;color:white;border:1px solid #72dfff66}
+#toast{position:fixed;top:76px;left:50%;transform:translateX(-50%);padding:9px 13px;border-radius:12px;background:#081522dd;border:1px solid #7adfff55;font-size:12px;display:none;z-index:6;text-align:center;max-width:90%}
+</style>
+</head>
+<body>
+<div id="game"></div>
+<div id="hud">
+  <div id="score" class="pill">MESAFE: <span id="distance">0</span> m<br>PUAN: <span id="points">0</span></div>
+  <div id="status" class="pill">Kamera: başlamadı</div>
+  <div id="help" class="pill">Eğil = çömel • Zıpla = yukarı sıçra • Sağa/sola eğil = şerit değiştir<br>İstersen alttaki dokunmatik butonları da kullan.</div>
+</div>
+<video id="cam" autoplay playsinline muted></video><div id="camlabel">HAREKET KAMERASI</div>
+<div id="fallback">
+<button id="leftBtn">◀ SOL</button><button id="jumpBtn">⤒ ZIPLA</button><button id="duckBtn">⬇ EĞİL</button><button id="rightBtn">SAĞ ▶</button>
+</div>
+<div id="toast"></div>
+<div id="overlay">
+ <div class="panel">
+  <h1>Motion Runner 3D</h1>
+  <p>Telefonun ön kamerası vücut pozunu algılar. Eğilince karakter çömelir, zıplayınca sıçrar; sağa/sola eğilince şerit değiştirir.</p>
+  <p><b>Önemli:</b> Kamera algılaması için sayfayı HTTPS üzerinden açman ve kamera izni vermen gerekir. Hareket algılama ilk açılışta internetten model dosyası yükler.</p>
+  <button id="startBtn">OYUNU BAŞLAT + KAMERAYI AÇ</button><br>
+  <button id="playBtn" class="secondary">Kamerasız oyna</button>
+  <p style="font-size:11px;color:#9bb4c9">Kameradaki görüntü bu sayfada işlenir. Bu prototip görüntüyü sunucuya göndermez.</p>
+ </div>
+</div>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+const $=id=>document.getElementById(id);
+const host=$('game'), overlay=$('overlay'), status=$('status'), video=$('cam');
+let scene,camera,renderer,clock,player,playerParts={}, obstacles=[],floorLines=[];
+let running=false, gameOver=false, score=0, distance=0, speed=13, spawnTimer=0;
+let targetLane=0, lane=0, crouch=0, jumpY=0, jumpV=0, jumpLock=0, manualCrouch=false;
+let poseLandmarker=null, lastVideoTime=-1, lastPoseAt=0, lastHipY=null, jumpCooldown=0, lastLaneSignal=0;
+let poseReady=false, cameraStream=null, toastTimer=null;
+function toast(s){$('toast').textContent=s;$('toast').style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').style.display='none',2800)}
+function init3D(){
+ scene=new THREE.Scene();scene.background=new THREE.Color(0x07111f);scene.fog=new THREE.Fog(0x07111f,22,100);
+ camera=new THREE.PerspectiveCamera(62,innerWidth/innerHeight,.1,160);camera.position.set(0,5.4,9.5);
+ renderer=new THREE.WebGLRenderer({antialias:false,powerPreference:'low-power'});renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));renderer.setSize(innerWidth,innerHeight);renderer.shadowMap.enabled=false;host.appendChild(renderer.domElement);
+ scene.add(new THREE.HemisphereLight(0xa9eaff,0x1b2740,2));
+ const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(-4,10,5);scene.add(light);
+ const floor=new THREE.Mesh(new THREE.PlaneGeometry(18,180),new THREE.MeshStandardMaterial({color:0x122b40,roughness:1}));floor.rotation.x=-Math.PI/2;floor.position.set(0,-.08,-48);scene.add(floor);
+ const road=new THREE.Mesh(new THREE.PlaneGeometry(8,180),new THREE.MeshStandardMaterial({color:0x203b50,roughness:1}));road.rotation.x=-Math.PI/2;road.position.set(0,-.04,-48);scene.add(road);
+ for(let z=-130;z<15;z+=5){const m=new THREE.Mesh(new THREE.BoxGeometry(.045,.025,1.8),new THREE.MeshBasicMaterial({color:0x59dfff}));m.position.set(0,.01,z);scene.add(m);floorLines.push(m)}
+ for(const x of [-1.34,1.34]){const m=new THREE.Mesh(new THREE.BoxGeometry(.035,.025,180),new THREE.MeshBasicMaterial({color:0x46c8f2}));m.position.set(x,.015,-48);scene.add(m)}
+ // low-poly stylized runner
+ player=new THREE.Group();scene.add(player);player.position.set(0,0,2);
+ const mat=(c,em=0)=>new THREE.MeshStandardMaterial({color:c,emissive:em,roughness:.65});
+ const suit=mat(0x18bfe9,0x052d42), dark=mat(0x10283c), skin=mat(0xf0bd91), visor=mat(0x07131d,0x0a3449), glow=mat(0x52e7ff,0x159dca);
+ function part(name,geo,material,x,y,z){let m=new THREE.Mesh(geo,material);m.position.set(x,y,z);player.add(m);playerParts[name]=m;return m}
+ part('torso',new THREE.BoxGeometry(.58,.78,.32),suit,0,1.25,0);
+ part('head',new THREE.SphereGeometry(.25,10,8),skin,0,1.86,0);
+ part('visor',new THREE.BoxGeometry(.34,.105,.04),visor,0,1.9,-.22);
+ part('chest',new THREE.BoxGeometry(.22,.18,.035),glow,0,1.35,-.18);
+ for(const s of [-1,1]){
+  const arm=part('arm'+s,new THREE.BoxGeometry(.19,.62,.2),dark,s*.42,1.28,0);arm.rotation.z=s*-.12;
+  part('leg'+s,new THREE.BoxGeometry(.23,.62,.25),suit,s*.18,.42,0);
+  part('boot'+s,new THREE.BoxGeometry(.28,.14,.36),dark,s*.18,.12,-.045);
+ }
+ // distant decorative skyline
+ for(let i=0;i<24;i++){let w=1+Math.random()*2,h=2+Math.random()*9;let b=new THREE.Mesh(new THREE.BoxGeometry(w,h,1.5),mat(i%2?0x132d43:0x18384c));b.position.set((Math.random()<.5?-1:1)*(5+Math.random()*7),h/2,-10-Math.random()*105);scene.add(b)}
+ clock=new THREE.Clock();window.addEventListener('resize',resize);resize();animate();
+}
+function resize(){if(!camera||!renderer)return;camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)}
+function makeObstacle(){
+ const laneChoice=[-1,0,1][Math.floor(Math.random()*3)], type=Math.random()<.52?'low':'high';
+ const g=new THREE.Group();g.position.set(laneChoice*1.34,0,-72);
+ const material=new THREE.MeshStandardMaterial({color:type==='low'?0xffb23d:0xf34e6b,emissive:type==='low'?0x512500:0x4a0713,roughness:.8});
+ let mesh;
+ if(type==='low'){mesh=new THREE.Mesh(new THREE.BoxGeometry(1.05,.48,.48),material);mesh.position.y=.24}
+ else {const left=new THREE.Mesh(new THREE.BoxGeometry(.16,1.55,.2),material);left.position.set(-.48,.775,0);g.add(left);const right=left.clone();right.position.x=.48;g.add(right);const top=new THREE.Mesh(new THREE.BoxGeometry(1.12,.18,.24),material);top.position.y=1.5;g.add(top);mesh=null}
+ if(mesh)g.add(mesh);g.userData={type,lane:laneChoice,hit:false};scene.add(g);obstacles.push(g);
+}
+function startGame(){overlay.style.display='none';running=true;gameOver=false;score=0;distance=0;speed=13;spawnTimer=.7;targetLane=0;lane=0;crouch=0;jumpY=0;jumpV=0;for(const o of obstacles)scene.remove(o);obstacles=[];toast('Başla! Engellere dikkat et.')}
+function endGame(){running=false;gameOver=true;overlay.style.display='flex';overlay.querySelector('h1').textContent='OYUN BİTTİ';overlay.querySelector('.panel p').innerHTML='Mesafe: <b>'+Math.floor(distance)+' m</b> • Puan: <b>'+score+'</b><br>Tekrar denemek için başlat butonuna bas.';$('startBtn').textContent='TEKRAR OYNA + KAMERA';$('playBtn').textContent='Tekrar oyna (kamerasız)'}
+function moveLane(dir){targetLane=Math.max(-1,Math.min(1,targetLane+dir))}
+function doJump(){if(jumpY<=.03&&jumpCooldown<=0){jumpV=7.3;jumpCooldown=.4}}
+function setManualCrouch(v){manualCrouch=v}
+function update(dt){
+ if(!running)return;
+ speed=Math.min(22,speed+dt*.12);distance+=speed*dt*.25;score=Math.floor(distance*2);
+ $('distance').textContent=Math.floor(distance);$('points').textContent=score;
+ lane+= (targetLane-lane)*Math.min(1,dt*9);player.position.x=lane*1.34;
+ if(jumpCooldown>0)jumpCooldown-=dt;
+ if(jumpV!==0||jumpY>0){jumpV-=18*dt;jumpY+=jumpV*dt;if(jumpY<=0){jumpY=0;jumpV=0}}
+ const wantedCrouch=(manualCrouch||performance.now()-lastPoseAt<600&&crouch>.4)?1:0;
+ crouch+=(wantedCrouch-crouch)*Math.min(1,dt*12);
+ player.position.y=jumpY;
+ playerParts.torso.position.y=1.25-crouch*.42;playerParts.torso.scale.y=1-crouch*.24;
+ playerParts.head.position.y=1.86-crouch*.56;
+ playerParts.visor.position.y=1.9-crouch*.56;playerParts.chest.position.y=1.35-crouch*.42;
+ for(const s of [-1,1]){playerParts['leg'+s].position.y=.42-crouch*.12;playerParts['arm'+s].position.y=1.28-crouch*.24}
+ spawnTimer-=dt;if(spawnTimer<=0){makeObstacle();spawnTimer=Math.max(.65,1.35-(speed-13)*.045)+Math.random()*.45}
+ for(let i=obstacles.length-1;i>=0;i--){const o=obstacles[i];o.position.z+=speed*dt;
+  if(!o.userData.hit&&Math.abs(o.position.z-player.position.z)<.62&&Math.abs(o.position.x-player.position.x)<.72){
+   const safe=o.userData.type==='low'?crouch>.52:jumpY>.48;
+   if(!safe){endGame();return}else{o.userData.hit=true;score+=25}
+  }
+  if(o.position.z>9){scene.remove(o);obstacles.splice(i,1)}
+ }
+ for(const l of floorLines){l.position.z+=speed*dt;if(l.position.z>8)l.position.z=-132}
+ // camera follows runner and dips when crouching, rises during jump
+ const desiredY=5.1-crouch*1.15+jumpY*.12;camera.position.x+=(player.position.x*.28-camera.position.x)*dt*3;
+ camera.position.y+=(desiredY-camera.position.y)*dt*3;
+ camera.position.z+=(9.5-camera.position.z)*dt*2.5;
+ camera.lookAt(player.position.x*.22,1.05-crouch*.36+jumpY*.25,-3.2);
+ // simple running motion
+ const swing=Math.sin(performance.now()*.012)*.12*(1-crouch);
+ playerParts['leg-1'].rotation.x=swing;playerParts['leg1'].rotation.x=-swing;
+ playerParts['arm-1'].rotation.x=-swing;playerParts['arm1'].rotation.x=swing;
+}
+function animate(){requestAnimationFrame(animate);const dt=Math.min(clock?clock.getDelta():.016,.04);update(dt);if(renderer&&scene&&camera)renderer.render(scene,camera)}
+async function startPose(){
+ try{
+  if(!navigator.mediaDevices?.getUserMedia)throw new Error('Bu tarayıcı kamera erişimini desteklemiyor. HTTPS bağlantısı kullan.');
+  status.textContent='Kamera izni bekleniyor…';
+  cameraStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});
+  video.srcObject=cameraStream;await video.play();video.style.display='block';$('camlabel').style.display='block';
+  status.textContent='Poz modeli yükleniyor…';
+  const vision=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14');
+  const fileset=await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  poseLandmarker=await vision.PoseLandmarker.createFromOptions(fileset,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',delegate:'GPU'},runningMode:'VIDEO',numPoses:1});
+  poseReady=true;status.textContent='Kamera hazır • hareket algılanıyor';toast('Kamera hazır. Tüm vücudunu kadraja al; eğilme ve zıplama hareketlerini abartılı yap.');
+  detectPose();
+ }catch(e){console.error(e);status.textContent='Kamera açılamadı';toast('Kamera başlatılamadı. HTTPS, kamera izni ve internet bağlantısını kontrol et. Kamerasız butonları kullanabilirsin.');}
+}
+function detectPose(){
+ if(!poseReady||video.readyState<2){requestAnimationFrame(detectPose);return}
+ if(video.currentTime!==lastVideoTime){
+  lastVideoTime=video.currentTime;
+  try{
+   const res=poseLandmarker.detectForVideo(video,performance.now());
+   if(res.landmarks&&res.landmarks.length){
+    const p=res.landmarks[0], nose=p[0], ls=p[11],rs=p[12],lh=p[23],rh=p[24],lk=p[25],rk=p[26],la=p[27],ra=p[28];
+    const visible=[nose,ls,rs,lh,rh].every(v=>v&&v.visibility>.35);
+    if(visible){
+     lastPoseAt=performance.now();
+     const hipY=(lh.y+rh.y)/2, shoulderY=(ls.y+rs.y)/2;
+     const torso=Math.abs(hipY-shoulderY);
+     // crouch: hips rise toward shoulders in image and/or knees bend
+     let kneeBend=false;
+     if(lk.visibility>.35&&rk.visibility>.35&&la.visibility>.35&&ra.visibility>.35){
+       const kneeMid=(lk.y+rk.y)/2, ankleMid=(la.y+ra.y)/2;
+       kneeBend=(kneeMid-hipY)>.13 && (ankleMid-kneeMid)>.10 && torso<.33;
+     }
+     const crouchSignal=kneeBend||torso<.20;
+     if(crouchSignal)crouch=Math.max(crouch,.8);else if(performance.now()-lastPoseAt<100)crouch=Math.min(crouch,.25);
+     // detect upward body movement: hip point rises quickly in image (y decreases)
+     if(lastHipY!==null){
+       const delta=lastHipY-hipY;
+       if(delta>.045&&jumpCooldown<=0&&!crouchSignal){doJump()}
+     }
+     lastHipY=hipY;
+     // lean left/right: shoulder center offset from hip center
+     const shoulderX=(ls.x+rs.x)/2, hipX=(lh.x+rh.x)/2, lean=shoulderX-hipX;
+     const now=performance.now();
+     if(now-lastLaneSignal>650){
+      if(lean>.075){moveLane(-1);lastLaneSignal=now}
+      else if(lean<-.075){moveLane(1);lastLaneSignal=now}
+     }
+     status.textContent=crouchSignal?'Algılandı: EĞİL':jumpY>.2?'Algılandı: ZIPLA':'Kamera hazır • hareket algılanıyor';
+    }
+   }else{status.textContent='Vücudunu kadraja al';}
+  }catch(e){console.warn(e)}
+ }
+ requestAnimationFrame(detectPose)
+}
+$('startBtn').addEventListener('click',async()=>{startGame();if(!poseReady)await startPose();});
+$('playBtn').addEventListener('click',()=>{startGame();status.textContent='Kamerasız mod • dokunmatik kontroller';});
+$('leftBtn').addEventListener('pointerdown',e=>{e.preventDefault();moveLane(-1)});
+$('rightBtn').addEventListener('pointerdown',e=>{e.preventDefault();moveLane(1)});
+$('jumpBtn').addEventListener('pointerdown',e=>{e.preventDefault();doJump()});
+$('duckBtn').addEventListener('pointerdown',e=>{e.preventDefault();setManualCrouch(true)});
+for(const ev of ['pointerup','pointercancel','pointerleave'])$('duckBtn').addEventListener(ev,()=>setManualCrouch(false));
+window.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='a')moveLane(-1);if(e.key==='ArrowRight'||e.key==='d')moveLane(1);if(e.key===' '||e.key==='ArrowUp')doJump();if(e.key==='ArrowDown'||e.key==='s')setManualCrouch(true)});
+window.addEventListener('keyup',e=>{if(e.key==='ArrowDown'||e.key==='s')setManualCrouch(false)});
+init3D();
+</script>
+</body>
+</html>
